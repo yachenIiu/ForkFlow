@@ -1,4 +1,4 @@
-# 推送 main 时自动部署。Secrets：CLOUDFLARE_* 三个 + GITHUB_TOKEN（可选，配置后每次部署会同步到 Worker）
+# 推送 main 时自动部署。Secrets：CLOUDFLARE_* 三个 + GH_TOKEN（可选，配置后每次部署会同步到 Worker 的 GITHUB_TOKEN）
 name: Deploy to Cloudflare Workers
 
 on:
@@ -42,12 +42,12 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
-      - name: Sync GITHUB_TOKEN to Worker
+      - name: Sync GH_TOKEN to Worker (as GITHUB_TOKEN)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
-          if [ -n "$GITHUB_PAT" ]; then
-            printf '%s' "$GITHUB_PAT" | npx wrangler secret put GITHUB_TOKEN
+          if [ -n "$GH_TOKEN" ]; then
+            printf '%s' "$GH_TOKEN" | npx wrangler secret put GITHUB_TOKEN
           fi
