@@ -107,23 +107,57 @@ async function syncOne(owner, repo, branch = 'main', token) {
   if (!token) {
     return { success: false, message: '未配置 GITHUB_TOKEN' };
   }
-  const url = `${GITHUB_API}/repos/${owner}/${repo}/merge-upstream`;
   try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: githubHeaders(token, { 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ branch }),
-    });
-    const data = await res.json().catch(() => ({}));
+    const url = `${GITHUB_API}/repos/${owner}/${repo}/merge-upstream`;
+
+    async function doMerge(targetBranch) {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: githubHeaders(token, { 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ branch: targetBranch }),
+      });
+      const data = await res.json().catch(() => ({}));
+      return { res, data };
+    }
+
+    // 第一次使用传入的 branch 尝试
+    let { res, data } = await doMerge(branch);
+
+    // 若分支不存在，自动回退到 GitHub 默认分支再试一次
+    if (
+      !res.ok &&
+      data &&
+      typeof data.message === 'string' &&
+      /branch not found/i.test(data.message)
+    ) {
+      const infoRes = await fetch(`${GITHUB_API}/repos/${owner}/${repo}`, {
+        headers: githubHeaders(token),
+      });
+      if (infoRes.ok) {
+        const info = await infoRes.json().catch(() => ({}));
+        const defBranch = info && info.default_branch;
+        if (defBranch && defBranch !== branch) {
+          ({ res, data } = await doMerge(defBranch));
+        }
+      }
+    }
 
     // GitHub 在分支未落后时会返回类似：
     // "This branch is not behind the upstream xxx:main."
+    // 成功快进时会返回：
+    // "Successfully fetched and fast-forwarded from upstream xxx:main."
     if (
       data &&
       typeof data.message === 'string' &&
       data.message.includes('This branch is not behind the upstream')
     ) {
       data.message = '当前主分支已是最新';
+    } else if (
+      data &&
+      typeof data.message === 'string' &&
+      /Successfully fetched and fast-forwarded from upstream/i.test(data.message)
+    ) {
+      data.message = '已从上游同步最新代码';
     }
 
     if (!res.ok) {
@@ -133,7 +167,7 @@ async function syncOne(owner, repo, branch = 'main', token) {
       }
       return { success: false, message: msg, status: res.status };
     }
-    return { success: true, data, message: data.message || '同步成功' };
+    return { success: true, data, message: data.message || '已从上游同步最新代码' };
   } catch (err) {
     let msg = err.message || '请求失败';
     if (/not behind/i.test(msg) && /upstream/i.test(msg)) {
@@ -167,14 +201,70 @@ function jsonResponse(obj, init = {}) {
   });
 }
 
+// 优先从请求头取 Token（OAuth 登录），否则用环境变量（GH_TOKEN 同步）
+function getToken(request, env) {
+  const auth = request.headers.get('Authorization');
+  const bearer = auth && auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+  if (bearer) return bearer;
+  return (env.GITHUB_TOKEN || '').trim();
+}
+
 // ---------- 主处理 ----------
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const { pathname, searchParams } = url;
-    const token = (env.GITHUB_TOKEN || '').trim();
+    const token = getToken(request, env);
 
     try {
+      // ---------- OAuth 登录（可选，替代 GH_TOKEN 变量）----------
+      const clientId = (env.GITHUB_OAUTH_CLIENT_ID || '').trim();
+      const clientSecret = (env.GITHUB_OAUTH_CLIENT_SECRET || '').trim();
+      const origin = `${url.protocol}//${url.host}`;
+
+      if (request.method === 'GET' && pathname === '/api/auth/login') {
+        if (!clientId) {
+          return jsonResponse(
+            { ok: false, message: '未配置 GITHUB_OAUTH_CLIENT_ID，请在 Worker 或 GitHub Secret 中配置' },
+            { status: 501 }
+          );
+        }
+        const redirectUri = `${origin}/api/auth/callback`;
+        const scope = 'repo,read:user,workflow';
+        const authUrl = `https://github.com/login/oauth/authorize?client_id=${encodeURIComponent(
+          clientId
+        )}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(scope)}`;
+        return Response.redirect(authUrl, 302);
+      }
+
+      if (request.method === 'GET' && pathname === '/api/auth/callback') {
+        const code = searchParams.get('code');
+        if (!code || !clientId || !clientSecret) {
+          return Response.redirect(origin + '/?auth=error', 302);
+        }
+        const redirectUri = `${origin}/api/auth/callback`;
+        const r = await fetch('https://github.com/login/oauth/access_token', {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+            'User-Agent': 'ForkFlow/1.0 (Cloudflare Worker)',
+          },
+          body: JSON.stringify({
+            client_id: clientId,
+            client_secret: clientSecret,
+            code,
+            redirect_uri: redirectUri,
+          }),
+        });
+        const data = await r.json().catch(() => ({}));
+        const accessToken = data.access_token;
+        if (!accessToken) {
+          return Response.redirect(origin + '/?auth=error&msg=' + encodeURIComponent(data.error_description || data.error || 'unknown'), 302);
+        }
+        return Response.redirect(origin + '/?token=' + encodeURIComponent(accessToken), 302);
+      }
+
       // 获取仓库列表
       if (request.method === 'GET' && pathname === '/api/repos') {
         const repos = await listRepos(env);
@@ -185,8 +275,8 @@ export default {
       if (request.method === 'GET' && pathname === '/api/current-user') {
         if (!token) {
           return jsonResponse(
-            { ok: false, message: '未配置 GITHUB_TOKEN，无法获取当前 GitHub 用户' },
-            { status: 500 }
+            { ok: false, message: '请使用 GitHub 登录，或在仓库 Secrets 中配置 GH_TOKEN' },
+            { status: 401 }
           );
         }
         const r = await fetch('https://api.github.com/user', {
@@ -209,6 +299,7 @@ export default {
           ok: true,
           login: data.login || '',
           name: data.name || '',
+          avatar_url: data.avatar_url || '',
         });
       }
 
@@ -236,11 +327,8 @@ export default {
         if (!owner) {
           if (!token) {
             return jsonResponse(
-              {
-                ok: false,
-                message: '未配置 GITHUB_TOKEN，无法自动获取当前用户 owner',
-              },
-              { status: 500 }
+              { ok: false, message: '请使用 GitHub 登录或配置 GH_TOKEN 后再添加仓库' },
+              { status: 401 }
             );
           }
           const uRes = await fetch('https://api.github.com/user', {
@@ -326,6 +414,7 @@ export default {
                 forkPushedAt,
                 forkLastCommitSha,
                 forkLastCommitMessage,
+                branch: forkBranch,
                 upstreamFullName,
                 upstreamPushedAt,
                 upstreamLastCommitSha,
@@ -340,34 +429,46 @@ export default {
         return jsonResponse(result);
       }
 
-      // 删除仓库
-      if (request.method === 'DELETE' && pathname.startsWith('/api/repos/')) {
+      // 获取 / 删除 / 更新单个仓库
+      if (pathname.startsWith('/api/repos/')) {
         const id = pathname.split('/').pop();
-        const result = await removeRepo(env, id);
-        if (!result.ok) {
-          return jsonResponse(result, { status: 404 });
-        }
-        return jsonResponse(result);
-      }
 
-      // 更新仓库（仅 branch/label 等）
-      if (request.method === 'PATCH' && pathname.startsWith('/api/repos/')) {
-        const id = pathname.split('/').pop();
-        const body = await request.json().catch(() => ({}));
-        const { branch, label } = body || {};
-        const result = await updateRepo(env, id, { branch, label });
-        if (!result.ok) {
-          return jsonResponse(result, { status: 404 });
+        // 获取单个
+        if (request.method === 'GET') {
+          const repo = await getRepo(env, id);
+          if (!repo) {
+            return jsonResponse({ ok: false, message: '未找到该仓库' }, { status: 404 });
+          }
+          return jsonResponse({ ok: true, data: repo });
         }
-        return jsonResponse(result);
+
+        // 删除
+        if (request.method === 'DELETE') {
+          const result = await removeRepo(env, id);
+          if (!result.ok) {
+            return jsonResponse(result, { status: 404 });
+          }
+          return jsonResponse(result);
+        }
+
+        // 更新（仅 branch/label 等）
+        if (request.method === 'PATCH') {
+          const body = await request.json().catch(() => ({}));
+          const { branch, label } = body || {};
+          const result = await updateRepo(env, id, { branch, label });
+          if (!result.ok) {
+            return jsonResponse(result, { status: 404 });
+          }
+          return jsonResponse(result);
+        }
       }
 
       // 同步单个仓库
       if (request.method === 'POST' && pathname.startsWith('/api/sync/')) {
         if (!token) {
           return jsonResponse(
-            { ok: false, message: '未配置 GITHUB_TOKEN，请在环境变量中设置' },
-            { status: 500 }
+            { ok: false, message: '请使用 GitHub 登录或配置 GH_TOKEN' },
+            { status: 401 }
           );
         }
         const id = pathname.split('/').pop();
@@ -391,6 +492,79 @@ export default {
         ) {
           message = '当前主分支已是最新';
         }
+
+        // 若同步成功，则顺带刷新该仓库的元信息
+        if (result.success) {
+          try {
+            const headers = githubHeaders(token);
+            const infoRes = await fetch(
+              `${GITHUB_API}/repos/${repo.owner}/${repo.repo}`,
+              { headers }
+            );
+            if (infoRes.ok) {
+              const info = await infoRes.json();
+              const forkPushedAt = info.pushed_at || null;
+              const forkBranch = info.default_branch || repo.branch || 'main';
+
+              let forkLastCommitSha = null;
+              let forkLastCommitMessage = null;
+              try {
+                const cRes = await fetch(
+                  `${GITHUB_API}/repos/${repo.owner}/${repo.repo}/commits?per_page=1&sha=${forkBranch}`,
+                  { headers }
+                );
+                if (cRes.ok) {
+                  const commits = await cRes.json();
+                  if (Array.isArray(commits) && commits[0]) {
+                    forkLastCommitSha = commits[0].sha || null;
+                    forkLastCommitMessage =
+                      (commits[0].commit && commits[0].commit.message) || null;
+                  }
+                }
+              } catch {
+                // ignore
+              }
+
+              let upstreamFullName = null;
+              let upstreamPushedAt = null;
+              let upstreamLastCommitSha = null;
+              let upstreamLastCommitMessage = null;
+              if (info.parent && info.parent.full_name) {
+                upstreamFullName = info.parent.full_name;
+                upstreamPushedAt = info.parent.pushed_at || null;
+                const upstreamBranch = info.parent.default_branch || 'main';
+                try {
+                  const uRes = await fetch(
+                    `${GITHUB_API}/repos/${info.parent.owner.login}/${info.parent.name}/commits?per_page=1&sha=${upstreamBranch}`,
+                    { headers }
+                  );
+                  if (uRes.ok) {
+                    const uCommits = await uRes.json();
+                    if (Array.isArray(uCommits) && uCommits[0]) {
+                      upstreamLastCommitSha = uCommits[0].sha || null;
+                      upstreamLastCommitMessage =
+                        (uCommits[0].commit && uCommits[0].commit.message) || null;
+                    }
+                  }
+                } catch {
+                  // ignore
+                }
+              }
+              await updateRepo(env, id, {
+                forkPushedAt,
+                forkLastCommitSha,
+                forkLastCommitMessage,
+                upstreamFullName,
+                upstreamPushedAt,
+                upstreamLastCommitSha,
+                upstreamLastCommitMessage,
+              });
+            }
+          } catch {
+            // 元信息刷新失败不影响同步结果
+          }
+        }
+
         return jsonResponse({ ok: result.success, message, data: result.data });
       }
 
@@ -398,8 +572,8 @@ export default {
       if (request.method === 'POST' && pathname === '/api/sync-all') {
         if (!token) {
           return jsonResponse(
-            { ok: false, message: '未配置 GITHUB_TOKEN，请在环境变量中设置' },
-            { status: 500 }
+            { ok: false, message: '请使用 GitHub 登录或配置 GH_TOKEN' },
+            { status: 401 }
           );
         }
         const repos = await listRepos(env);
@@ -414,8 +588,8 @@ export default {
       if (request.method === 'POST' && pathname === '/api/import-forks') {
         if (!token) {
           return jsonResponse(
-            { ok: false, message: '未配置 GITHUB_TOKEN，请在环境变量中设置' },
-            { status: 500 }
+            { ok: false, message: '请使用 GitHub 登录或配置 GH_TOKEN' },
+            { status: 401 }
           );
         }
         const beforeRepos = await listRepos(env);
@@ -557,8 +731,8 @@ export default {
       if (request.method === 'POST' && pathname === '/api/refresh-meta') {
         if (!token) {
           return jsonResponse(
-            { ok: false, message: '未配置 GITHUB_TOKEN，请在环境变量中设置' },
-            { status: 500 }
+            { ok: false, message: '请使用 GitHub 登录或配置 GH_TOKEN' },
+            { status: 401 }
           );
         }
 

@@ -9,7 +9,28 @@ import { syncOne, syncAll } from './sync.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3846;
-const token = process.env.GITHUB_TOKEN;
+const envToken = process.env.GITHUB_TOKEN;
+const oauthClientId = process.env.GITHUB_OAUTH_CLIENT_ID;
+const oauthClientSecret = process.env.GITHUB_OAUTH_CLIENT_SECRET;
+
+function githubHeaders(token, extra = {}) {
+  return {
+    Accept: 'application/vnd.github+json',
+    Authorization: `Bearer ${token}`,
+    'X-GitHub-Api-Version': '2022-11-28',
+    'User-Agent': 'ForkFlow/1.0 (Node server)',
+    ...extra,
+  };
+}
+
+// 优先从请求头 Authorization: Bearer xxx 取 Token，退回到 .env 中的 GITHUB_TOKEN
+function getTokenFromReq(req) {
+  const auth = req.headers.authorization || req.headers.Authorization;
+  if (auth && typeof auth === 'string' && auth.startsWith('Bearer ')) {
+    return auth.slice(7).trim();
+  }
+  return (envToken || '').trim();
+}
 
 app.use(cors());
 app.use(express.json());
@@ -17,9 +38,59 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // ---------- API ----------
 
+// GitHub OAuth 登录（本地版，可选，替代 .env 中的 GITHUB_TOKEN）
+app.get('/api/auth/login', (req, res) => {
+  if (!oauthClientId) {
+    return res
+      .status(501)
+      .json({ ok: false, message: '未配置 GITHUB_OAUTH_CLIENT_ID，请在 .env 中配置后再使用 GitHub 登录' });
+  }
+  const origin = `${req.protocol}://${req.get('host')}`;
+  const redirectUri = `${origin}/api/auth/callback`;
+  const scope = 'repo,read:user,workflow';
+  const authUrl = `https://github.com/login/oauth/authorize?client_id=${encodeURIComponent(
+    oauthClientId
+  )}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(scope)}`;
+  res.redirect(authUrl);
+});
+
+app.get('/api/auth/callback', async (req, res) => {
+  const code = req.query.code;
+  const origin = `${req.protocol}://${req.get('host')}`;
+  if (!code || !oauthClientId || !oauthClientSecret) {
+    return res.redirect(origin + '/?auth=error');
+  }
+  const redirectUri = `${origin}/api/auth/callback`;
+  try {
+    const r = await fetch('https://github.com/login/oauth/access_token', {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        'User-Agent': 'ForkFlow/1.0 (Node server)',
+      },
+      body: JSON.stringify({
+        client_id: oauthClientId,
+        client_secret: oauthClientSecret,
+        code,
+        redirect_uri: redirectUri,
+      }),
+    });
+    const data = await r.json().catch(() => ({}));
+    const accessToken = data.access_token;
+    if (!accessToken) {
+      const msg = encodeURIComponent(data.error_description || data.error || 'unknown');
+      return res.redirect(origin + '/?auth=error&msg=' + msg);
+    }
+    return res.redirect(origin + '/?token=' + encodeURIComponent(accessToken));
+  } catch (e) {
+    return res.redirect(origin + '/?auth=error&msg=' + encodeURIComponent(e.message || 'unknown'));
+  }
+});
+
 // 元信息刷新节流：限制一定时间内的实际 GitHub 刷新频率，避免触发限流
 let lastMetaRefreshAt = 0;
-const MIN_REFRESH_INTERVAL_MS = 5 * 60 * 1000; // 5 分钟内只允许一次真实刷新
+const MIN_REFRESH_INTERVAL_MS = 5 * 1000; // 5 秒内只允许一次真实刷新*** End Patch```} -->
 
 // 获取所有 fork 项目
 app.get('/api/repos', (req, res) => {
@@ -33,18 +104,15 @@ app.get('/api/repos', (req, res) => {
 
 // 获取当前 Token 对应的 GitHub 用户（用于前端自动填充 Owner）
 app.get('/api/current-user', async (req, res) => {
+  const token = getTokenFromReq(req);
   if (!token) {
     return res
-      .status(500)
-      .json({ ok: false, message: '未配置 GITHUB_TOKEN，无法获取当前 GitHub 用户' });
+      .status(401)
+      .json({ ok: false, message: '请使用 GitHub 登录，或在 .env 中配置 GITHUB_TOKEN' });
   }
   try {
     const r = await fetch('https://api.github.com/user', {
-      headers: {
-        Accept: 'application/vnd.github+json',
-        Authorization: `Bearer ${token}`,
-        'X-GitHub-Api-Version': '2022-11-28',
-      },
+      headers: githubHeaders(token),
     });
     const data = await r.json().catch(() => ({}));
     if (!r.ok) {
@@ -55,6 +123,7 @@ app.get('/api/current-user', async (req, res) => {
       ok: true,
       login: data.login || '',
       name: data.name || '',
+      avatar_url: data.avatar_url || '',
     });
   } catch (e) {
     res
@@ -74,20 +143,18 @@ app.post('/api/repos', (req, res) => {
         return res.status(400).json({ ok: false, message: '缺少 repo 名称' });
       }
 
+      const token = getTokenFromReq(req);
+
       // 如果未显式填写 owner，则默认使用当前 Token 对应用户的登录名
       if (!owner) {
         if (!token) {
           return res
-            .status(500)
-            .json({ ok: false, message: '未配置 GITHUB_TOKEN，无法自动获取当前用户 owner' });
+            .status(401)
+            .json({ ok: false, message: '请使用 GitHub 登录或在 .env 中配置 GITHUB_TOKEN 后再添加仓库' });
         }
         try {
           const uRes = await fetch('https://api.github.com/user', {
-            headers: {
-              Accept: 'application/vnd.github+json',
-              Authorization: `Bearer ${token}`,
-              'X-GitHub-Api-Version': '2022-11-28',
-            },
+            headers: githubHeaders(token),
           });
           if (!uRes.ok) {
             const uData = await uRes.json().catch(() => ({}));
@@ -115,11 +182,7 @@ app.post('/api/repos', (req, res) => {
       // 为新添加的仓库补充基础元信息（时间 & 上游），与导入逻辑保持一致
       try {
         if (token) {
-          const headers = {
-            Accept: 'application/vnd.github+json',
-            Authorization: `Bearer ${token}`,
-            'X-GitHub-Api-Version': '2022-11-28',
-          };
+          const headers = githubHeaders(token);
 
           const infoRes = await fetch(
             `https://api.github.com/repos/${owner}/${repo}`,
@@ -200,6 +263,17 @@ app.post('/api/repos', (req, res) => {
   })();
 });
 
+// 获取单个项目
+app.get('/api/repos/:id', (req, res) => {
+  try {
+    const repo = store.getRepo(req.params.id);
+    if (!repo) return res.status(404).json({ ok: false, message: '未找到该仓库' });
+    res.json({ ok: true, data: repo });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: e.message });
+  }
+});
+
 // 删除项目
 app.delete('/api/repos/:id', (req, res) => {
   try {
@@ -225,8 +299,11 @@ app.patch('/api/repos/:id', (req, res) => {
 
 // 同步单个项目
 app.post('/api/sync/:id', async (req, res) => {
+  const token = getTokenFromReq(req);
   if (!token) {
-    return res.status(500).json({ ok: false, message: '未配置 GITHUB_TOKEN，请在 .env 中设置' });
+    return res
+      .status(401)
+      .json({ ok: false, message: '请使用 GitHub 登录或在 .env 中配置 GITHUB_TOKEN' });
   }
   try {
     const repo = store.getRepo(req.params.id);
@@ -243,6 +320,103 @@ app.post('/api/sync/:id', async (req, res) => {
     ) {
       message = '当前主分支已是最新';
     }
+
+    // 若同步成功，则顺带刷新该仓库的元信息（最近 commit / 上游 / 是否落后）
+    if (result.success) {
+      try {
+        const headers = githubHeaders(token);
+        const infoRes = await fetch(
+          `https://api.github.com/repos/${repo.owner}/${repo.repo}`,
+          { headers }
+        );
+        if (infoRes.ok) {
+          const info = await infoRes.json();
+          const forkPushedAt = info.pushed_at || null;
+          const forkBranch = info.default_branch || repo.branch || 'main';
+
+          let forkLastCommitSha = null;
+          let forkLastCommitMessage = null;
+          try {
+            const cRes = await fetch(
+              `https://api.github.com/repos/${repo.owner}/${repo.repo}/commits?per_page=1&sha=${forkBranch}`,
+              { headers }
+            );
+            if (cRes.ok) {
+              const commits = await cRes.json();
+              if (Array.isArray(commits) && commits[0]) {
+                forkLastCommitSha = commits[0].sha || null;
+                forkLastCommitMessage =
+                  (commits[0].commit && commits[0].commit.message) || null;
+              }
+            }
+          } catch {
+            // 忽略单个仓库 commit 查询失败
+          }
+
+          let upstreamFullName = null;
+          let upstreamPushedAt = null;
+          let upstreamLastCommitSha = null;
+          let upstreamLastCommitMessage = null;
+
+          let isBehindUpstream = false;
+
+          if (info.parent && info.parent.full_name) {
+            upstreamFullName = info.parent.full_name;
+            upstreamPushedAt = info.parent.pushed_at || null;
+            const upstreamBranch = info.parent.default_branch || 'main';
+            try {
+              const uRes = await fetch(
+                `https://api.github.com/repos/${info.parent.owner.login}/${info.parent.name}/commits?per_page=1&sha=${upstreamBranch}`,
+                { headers }
+              );
+              if (uRes.ok) {
+                const uCommits = await uRes.json();
+                if (Array.isArray(uCommits) && uCommits[0]) {
+                  upstreamLastCommitSha = uCommits[0].sha || null;
+                  upstreamLastCommitMessage =
+                    (uCommits[0].commit && uCommits[0].commit.message) || null;
+                }
+              }
+            } catch {
+              // 忽略上游 commit 查询失败
+            }
+
+            // compare 判断是否落后
+            try {
+              const [upOwner, upRepo] = upstreamFullName.split('/');
+              const cmpRes = await fetch(
+                `https://api.github.com/repos/${upOwner}/${upRepo}/compare/${upstreamBranch}...${repo.owner}:${forkBranch}`,
+                { headers }
+              );
+              if (cmpRes.ok) {
+                const cmp = await cmpRes.json().catch(() => ({}));
+                const behind = Number(cmp && cmp.behind_by);
+                if (!Number.isNaN(behind) && behind > 0) {
+                  isBehindUpstream = true;
+                }
+              }
+            } catch {
+              // compare 失败时保持默认 false
+            }
+          }
+
+          store.updateRepo(req.params.id, {
+            forkPushedAt,
+            forkLastCommitSha,
+            forkLastCommitMessage,
+            branch: forkBranch,
+            upstreamFullName,
+            upstreamPushedAt,
+            upstreamLastCommitSha,
+            upstreamLastCommitMessage,
+            isBehindUpstream,
+          });
+        }
+      } catch {
+        // 元信息刷新失败不影响同步结果
+      }
+    }
+
     res.json({ ok: result.success, message, data: result.data });
   } catch (e) {
     const message = e.message || '同步失败';
@@ -252,8 +426,11 @@ app.post('/api/sync/:id', async (req, res) => {
 
 // 一键批量同步
 app.post('/api/sync-all', async (req, res) => {
+  const token = getTokenFromReq(req);
   if (!token) {
-    return res.status(500).json({ ok: false, message: '未配置 GITHUB_TOKEN，请在 .env 中设置' });
+    return res
+      .status(401)
+      .json({ ok: false, message: '请使用 GitHub 登录或在 .env 中配置 GITHUB_TOKEN' });
   }
   try {
     const repos = store.listRepos();
@@ -269,8 +446,11 @@ app.post('/api/sync-all', async (req, res) => {
 
 // 一键导入当前账号下所有 fork 仓库
 app.post('/api/import-forks', async (req, res) => {
+  const token = getTokenFromReq(req);
   if (!token) {
-    return res.status(500).json({ ok: false, message: '未配置 GITHUB_TOKEN，请在 .env 中设置' });
+    return res
+      .status(401)
+      .json({ ok: false, message: '请使用 GitHub 登录或在 .env 中配置 GITHUB_TOKEN' });
   }
   try {
     const beforeRepos = store.listRepos();
@@ -284,11 +464,7 @@ app.post('/api/import-forks', async (req, res) => {
     while (true) {
       const url = `https://api.github.com/user/repos?per_page=${perPage}&page=${page}&sort=updated`;
       const r = await fetch(url, {
-        headers: {
-          Accept: 'application/vnd.github+json',
-          Authorization: `Bearer ${token}`,
-          'X-GitHub-Api-Version': '2022-11-28',
-        },
+        headers: githubHeaders(token),
       });
       if (!r.ok) {
         const msg = (await r.json().catch(() => ({}))).message || r.statusText;
@@ -322,11 +498,7 @@ app.post('/api/import-forks', async (req, res) => {
       const beforeIds = new Set(beforeRepos.map((r) => r.id));
       const newlyAdded = afterRepos.filter((r) => !beforeIds.has(r.id));
 
-      const headers = {
-        Accept: 'application/vnd.github+json',
-        Authorization: `Bearer ${token}`,
-        'X-GitHub-Api-Version': '2022-11-28',
-      };
+      const headers = githubHeaders(token);
 
       for (const repo of newlyAdded) {
         try {
@@ -417,8 +589,11 @@ app.post('/api/import-forks', async (req, res) => {
 
 // 刷新所有仓库的时间和最新 commit 信息（包括上游）
 app.post('/api/refresh-meta', async (req, res) => {
+  const token = getTokenFromReq(req);
   if (!token) {
-    return res.status(500).json({ ok: false, message: '未配置 GITHUB_TOKEN，请在 .env 中设置' });
+    return res
+      .status(401)
+      .json({ ok: false, message: '请使用 GitHub 登录或在 .env 中配置 GITHUB_TOKEN' });
   }
   try {
     const force = req.query && req.query.force === '1';
@@ -446,11 +621,7 @@ app.post('/api/refresh-meta', async (req, res) => {
       return res.json({ ok: true, message: '暂无配置的仓库', data: [] });
     }
 
-    const headers = {
-      Accept: 'application/vnd.github+json',
-      Authorization: `Bearer ${token}`,
-      'X-GitHub-Api-Version': '2022-11-28',
-    };
+    const headers = githubHeaders(token);
 
     const results = [];
 
@@ -538,6 +709,27 @@ app.post('/api/refresh-meta', async (req, res) => {
           // 忽略上游 commit 查询失败
         }
 
+        // 使用 compare API 判断是否落后上游
+        let isBehindUpstream = false;
+        try {
+          const [upOwner, upRepo] = upstreamFullName.split('/');
+          if (upOwner && upRepo) {
+            const cmpRes = await fetch(
+              `https://api.github.com/repos/${upOwner}/${upRepo}/compare/${upstreamBranch}...${r.owner}:${forkBranch}`,
+              { headers }
+            );
+            if (cmpRes.ok) {
+              const cmp = await cmpRes.json().catch(() => ({}));
+              const behind = Number(cmp && cmp.behind_by);
+              if (!Number.isNaN(behind) && behind > 0) {
+                isBehindUpstream = true;
+              }
+            }
+          }
+        } catch {
+          // compare 失败时保持默认 false，不影响其他信息
+        }
+
         store.updateRepo(r.id, {
           forkPushedAt,
           forkLastCommitSha,
@@ -546,6 +738,7 @@ app.post('/api/refresh-meta', async (req, res) => {
           upstreamPushedAt,
           upstreamLastCommitSha,
           upstreamLastCommitMessage,
+          isBehindUpstream,
         });
 
         results.push({
@@ -589,5 +782,9 @@ app.get('*', (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Fork 同步管理服务已启动: http://localhost:${PORT}`);
-  if (!token) console.warn('未设置 GITHUB_TOKEN，同步功能将不可用，请在项目根目录创建 .env 并设置 GITHUB_TOKEN');
+  if (!envToken && !oauthClientId) {
+    console.warn(
+      '未设置 GITHUB_TOKEN 或 GITHUB_OAUTH_CLIENT_ID，本地同步功能将不可用，请在 .env 中配置 PAT 或 OAuth Client'
+    );
+  }
 });

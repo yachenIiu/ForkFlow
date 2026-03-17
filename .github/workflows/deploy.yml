@@ -51,3 +51,17 @@ jobs:
           if [ -n "$GH_TOKEN" ]; then
             printf '%s' "$GH_TOKEN" | npx wrangler secret put GITHUB_TOKEN
           fi
+
+      - name: Sync OAuth credentials to Worker (optional, for GitHub 登录)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          GH_OAUTH_CLIENT_ID: ${{ secrets.GH_OAUTH_CLIENT_ID }}
+          GH_OAUTH_CLIENT_SECRET: ${{ secrets.GH_OAUTH_CLIENT_SECRET }}
+        run: |
+          if [ -n "$GH_OAUTH_CLIENT_ID" ]; then
+            printf '%s' "$GH_OAUTH_CLIENT_ID" | npx wrangler secret put GITHUB_OAUTH_CLIENT_ID
+          fi
+          if [ -n "$GH_OAUTH_CLIENT_SECRET" ]; then
+            printf '%s' "$GH_OAUTH_CLIENT_SECRET" | npx wrangler secret put GITHUB_OAUTH_CLIENT_SECRET
+          fi

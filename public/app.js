@@ -1,4 +1,76 @@
 const API = '';
+const TOKEN_KEY = 'forkflow_gh_token';
+
+function getStoredToken() {
+  try {
+    return localStorage.getItem(TOKEN_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+function setStoredToken(token) {
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token);
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch {}
+}
+function clearStoredToken() {
+  setStoredToken('');
+}
+
+// 处理 OAuth 回调：URL 带 ?token= 时写入 storage 并去掉 URL 中的 token
+function handleOAuthCallback() {
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get('token');
+  const authError = params.get('auth');
+  if (token) {
+    setStoredToken(token);
+    params.delete('token');
+    const qs = params.toString();
+    const newUrl = window.location.pathname + (qs ? '?' + qs : '') + window.location.hash;
+    window.history.replaceState({}, '', newUrl);
+    return true;
+  }
+  if (authError) {
+    params.delete('auth');
+    params.delete('msg');
+    const qs = params.toString();
+    window.history.replaceState({}, '', window.location.pathname + (qs ? '?' + qs : ''));
+    showToast('GitHub 登录失败，请重试', 'error');
+  }
+  return false;
+}
+
+async function updateAuthUI() {
+  const hasToken = !!getStoredToken();
+  const loginBtn = document.getElementById('loginBtn');
+  const logoutBtn = document.getElementById('logoutBtn');
+  const authUser = document.getElementById('authUser');
+  const authAvatar = document.getElementById('authAvatar');
+  const authName = document.getElementById('authName');
+
+  if (!hasToken) {
+    if (loginBtn) loginBtn.style.display = 'inline-flex';
+    if (logoutBtn) logoutBtn.style.display = 'none';
+    if (authUser) authUser.style.display = 'none';
+    return;
+  }
+
+  if (loginBtn) loginBtn.style.display = 'none';
+  if (logoutBtn) logoutBtn.style.display = 'inline-flex';
+
+  if (!authUser || !authAvatar || !authName) return;
+
+  try {
+    const { ok, login, name, avatar_url: avatarUrl } = await api('/api/current-user');
+    if (!ok) return;
+    authUser.style.display = 'flex';
+    authAvatar.src = avatarUrl || 'https://avatars.githubusercontent.com/u/9919?v=4';
+    authName.textContent = login || name || '';
+  } catch {
+    // 忽略用户信息获取失败，只保留登录/退出按钮状态
+  }
+}
 
 function showToast(message, type = 'info') {
   const el = document.getElementById('toast');
@@ -86,11 +158,15 @@ function hideLoadingModal() {
 }
 
 async function api(path, options = {}) {
-  const res = await fetch(API + path, {
-    headers: { 'Content-Type': 'application/json', ...options.headers },
-    ...options,
-  });
+  const headers = { 'Content-Type': 'application/json', ...options.headers };
+  const token = getStoredToken();
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  const res = await fetch(API + path, { ...options, headers });
   const data = await res.json().catch(() => ({}));
+  if (res.status === 401) {
+    clearStoredToken();
+    updateAuthUI();
+  }
   if (!res.ok) throw new Error(data.message || res.statusText);
   return data;
 }
@@ -99,15 +175,22 @@ let allReposCache = [];
 let searchKeyword = '';
 let currentPage = 1;
 const PAGE_SIZE = 10;
+let filterMode = 'all'; // 'all' | 'behind'
 
 // 支持多关键词模糊匹配（空格分词，全部命中即可）
 function applyFilter() {
   const kw = searchKeyword.trim().toLowerCase();
-  if (!kw) return allReposCache;
+  let base = allReposCache;
+
+  if (filterMode === 'behind') {
+    base = base.filter((r) => r.isBehindUpstream);
+  }
+
+  if (!kw) return base;
 
   const tokens = kw.split(/\s+/).filter(Boolean);
 
-  return allReposCache.filter((r) => {
+  return base.filter((r) => {
     const name = (r.label || `${r.owner}/${r.repo}`).toLowerCase();
     const full = `${r.owner}/${r.repo}`.toLowerCase();
     const branch = (r.branch || 'main').toLowerCase();
@@ -204,6 +287,11 @@ function renderList(repos) {
           <a class="repo-link" href="https://github.com/${r.owner}/${r.repo}" target="_blank" rel="noopener">
             ${escapeHtml(r.label || `${r.owner}/${r.repo}`)}
           </a>
+          ${
+            r.isBehindUpstream
+              ? '<span class="repo-status-pill repo-status-behind">需同步</span>'
+              : ''
+          }
         </div>
         <div class="name-meta">
           ${
@@ -327,6 +415,17 @@ async function syncOne(id) {
     const msg = result.message || (result.ok ? '已同步' : '失败');
     setCellStatus(id, msg, result.ok);
     showToast(result.ok ? '同步成功' : msg, result.ok ? 'success' : 'error');
+    if (result.ok) {
+      // 同步成功后，只拉取该仓库的新数据，更新缓存并局部刷新列表
+      const one = await api(`/api/repos/${id}`);
+      if (one && one.ok && one.data) {
+        const idx = allReposCache.findIndex((r) => String(r.id) === String(id));
+        if (idx !== -1) {
+          allReposCache[idx] = one.data;
+        }
+        renderList(allReposCache);
+      }
+    }
   } catch (e) {
     const msg = e.message || '';
     setCellStatus(id, msg, false);
@@ -459,6 +558,35 @@ addForm.addEventListener('submit', async (e) => {
 
 document.getElementById('syncAllBtn').addEventListener('click', syncAll);
 
+// OAuth 回调与登录/登出 UI
+handleOAuthCallback();
+updateAuthUI();
+document.getElementById('loginBtn')?.addEventListener('click', () => {
+  window.location.href = API + '/api/auth/login';
+});
+document.getElementById('logoutBtn')?.addEventListener('click', () => {
+  clearStoredToken();
+  updateAuthUI();
+  allReposCache = [];
+  renderList(allReposCache);
+  showToast('已退出登录', 'info');
+});
+
+// 列表筛选：全部 / 仅需同步
+document.getElementById('filterAllBtn')?.addEventListener('click', () => {
+  filterMode = 'all';
+  document.getElementById('filterAllBtn').classList.add('filter-btn-active');
+  document.getElementById('filterBehindBtn').classList.remove('filter-btn-active');
+  renderList(allReposCache);
+});
+
+document.getElementById('filterBehindBtn')?.addEventListener('click', () => {
+  filterMode = 'behind';
+  document.getElementById('filterBehindBtn').classList.add('filter-btn-active');
+  document.getElementById('filterAllBtn').classList.remove('filter-btn-active');
+  renderList(allReposCache);
+});
+
 // 页面加载时尝试获取当前 GitHub 用户，并自动填充 Owner 输入框（仍允许用户覆盖）
 (async () => {
   if (!ownerInput) return;
@@ -468,7 +596,7 @@ document.getElementById('syncAllBtn').addEventListener('click', syncAll);
       ownerInput.value = login;
     }
   } catch {
-    // 获取失败时静默忽略，保持输入框为空
+    // 获取失败时静默忽略（未登录或 401），保持输入框为空
   }
 })();
 

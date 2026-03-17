@@ -17,29 +17,68 @@ export async function syncOne(owner, repo, branch = 'main', token) {
   if (!token) {
     return { success: false, message: '未配置 GITHUB_TOKEN' };
   }
-  const url = `${GITHUB_API}/repos/${owner}/${repo}/merge-upstream`;
   try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Accept': 'application/vnd.github+json',
-        'Authorization': `Bearer ${token}`,
-        'X-GitHub-Api-Version': '2022-11-28',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ branch }),
-    });
-    const data = await res.json().catch(() => ({}));
+    const url = `${GITHUB_API}/repos/${owner}/${repo}/merge-upstream`;
+
+    async function doMerge(targetBranch) {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Accept': 'application/vnd.github+json',
+          'Authorization': `Bearer ${token}`,
+          'X-GitHub-Api-Version': '2022-11-28',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ branch: targetBranch }),
+      });
+      const data = await res.json().catch(() => ({}));
+      return { res, data };
+    }
+
+    // 第一次使用传入的 branch 尝试
+    let { res, data } = await doMerge(branch);
+
+    // 若分支不存在，自动回退到 GitHub 默认分支再试一次
+    if (
+      !res.ok &&
+      data &&
+      typeof data.message === 'string' &&
+      /branch not found/i.test(data.message)
+    ) {
+      const infoRes = await fetch(`${GITHUB_API}/repos/${owner}/${repo}`, {
+        headers: {
+          'Accept': 'application/vnd.github+json',
+          'Authorization': `Bearer ${token}`,
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+      });
+      if (infoRes.ok) {
+        const info = await infoRes.json().catch(() => ({}));
+        const defBranch = info && info.default_branch;
+        if (defBranch && defBranch !== branch) {
+          ({ res, data } = await doMerge(defBranch));
+          // 成功的话，调用方可以根据需要把本地记录的分支更新为 defBranch
+        }
+      }
+    }
 
     // GitHub 在分支未落后时会返回类似：
     // "This branch is not behind the upstream xxx:main."
-    // 无论状态码是多少，都先把这类英文统一转换成中文。
+    // 成功快进时会返回：
+    // "Successfully fetched and fast-forwarded from upstream xxx:main."
+    // 先把这些英文统一转换成中文。
     if (
       data &&
       typeof data.message === 'string' &&
       data.message.includes('This branch is not behind the upstream')
     ) {
       data.message = '当前主分支已是最新';
+    } else if (
+      data &&
+      typeof data.message === 'string' &&
+      /Successfully fetched and fast-forwarded from upstream/i.test(data.message)
+    ) {
+      data.message = '已从上游同步最新代码';
     }
 
     if (!res.ok) {
@@ -50,7 +89,7 @@ export async function syncOne(owner, repo, branch = 'main', token) {
       }
       return { success: false, message: msg, status: res.status };
     }
-    return { success: true, data, message: data.message || '同步成功' };
+    return { success: true, data, message: data.message || '已从上游同步最新代码' };
   } catch (err) {
     let msg = err.message || '请求失败';
     if (/not behind/i.test(msg) && /upstream/i.test(msg)) {
