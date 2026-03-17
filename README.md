@@ -1,6 +1,40 @@
-# Fork 仓库同步管理
+# ForkFlow – GitHub Fork 同步管理仪表盘
 
-Web 页面集中管理 GitHub Fork：**一键批量同步、一键导入 Fork、自动刷新/清理上游信息**。需 Node.js 18+ 与 GitHub Token（`repo` 权限）。
+![GitHub Fork Sync Dashboard](https://bed.930419.xyz/file/1773743257173_iShot_2026-03-17_18.26.42.png) 
+
+**让 Fork 管理像流水一样丝滑。**
+
+你是否曾经：
+
+- Fork 了一堆仓库，却忘记同步上游更新？
+- 手动一个一个点 “Sync fork” 感到崩溃？
+- 列表里堆满早已删除或取消 Fork 的僵尸仓库？
+
+**ForkFlow 就是为你而生。**
+
+### ✨ 核心亮点
+
+- **一键批量同步**：选中所有或单个仓库，瞬间与上游合并，最新状态中文友好提示。
+- **智能一键导入**：自动拉取当前 GitHub 账号下全部 Fork，补全最新 commit 与更新时间。
+- **自动清理脏数据**：定期刷新上游信息，智能移除 GitHub 上已删除或取消 Fork 关系的仓库，保持列表永远干净。
+- **极简添加体验**：Owner 可留空（自动识别当前用户），添加后立即补全元信息。
+- **优雅交互**：Loading 弹框、确认对话、表格 Hover 高亮，一切都清晰直观。
+
+### 🛠 技术与部署
+
+- **前端**：纯 HTML + CSS + 原生 JavaScript（极致轻量）
+- **后端**：Node.js (Express) 本地版 或 Cloudflare Workers 无服务器版（使用 KV 存储）
+- **核心能力**：直接调用 GitHub Merge Upstream API，无需额外权限
+
+**3 分钟本地启动**：`npm install && npm start` → 访问 `http://localhost:3846`
+
+**零运维部署**：直接把 `worker.js` 扔到 Cloudflare Workers 即可全球加速运行。
+
+
+---
+
+**Fork 仓库同步，从此一键搞定。**  
+欢迎 Star & Fork，让更多开发者摆脱 Fork 管理的痛苦！
 
 ---
 
