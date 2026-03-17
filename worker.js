@@ -1,3 +1,5 @@
+import { ASSETS_CONTENT, ASSETS_TYPES } from './assets-content.js';
+
 const GITHUB_API = 'https://api.github.com';
 
 // ---------- KV 存储封装（替代本地 repos.json） ----------
@@ -703,13 +705,15 @@ export default {
         });
       }
 
-      // 未匹配到 API：由静态资源托管前端（同一 Worker 下 / 即页面，/api/* 即接口）
-      if (env.ASSETS) {
-        const assetUrl =
-          pathname === '/' || pathname === ''
-            ? new URL('/index.html', request.url)
-            : url;
-        return env.ASSETS.fetch(new Request(assetUrl, request));
+      // 未匹配到 API：返回内联静态资源（/ → index.html）
+      const assetPath =
+        pathname === '/' || pathname === '' ? '/index.html' : pathname;
+      const body = ASSETS_CONTENT[assetPath];
+      if (body !== undefined) {
+        const contentType = ASSETS_TYPES[assetPath] || ASSETS_TYPES['/index.html'];
+        return new Response(body, {
+          headers: { 'Content-Type': contentType },
+        });
       }
       return new Response('Not Found', { status: 404 });
     } catch (e) {

@@ -41,7 +41,7 @@ npm start
 4. 首次部署成功后，在 **Cloudflare** 为该 Worker 添加 Secret `GITHUB_TOKEN`。
 5. 推送到 `main` 即触发部署。
 
-本地部署：需把 KV id 写进 wrangler.toml 或通过环境变量在部署前注入，再 `npx wrangler deploy`。
+本地部署：先运行 `node build-embed-assets.js` 生成前端内联文件，再在 wrangler.toml 填好 account_id 与 KV id，执行 `npx wrangler deploy`。
 
 ---
 

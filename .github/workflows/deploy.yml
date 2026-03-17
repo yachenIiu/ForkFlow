@@ -25,6 +25,9 @@ jobs:
 
       - run: npm install
 
+      - name: Embed static assets for Worker
+        run: node build-embed-assets.js
+
       - name: Inject secrets into wrangler.toml
         run: |
           sed -i.bak 's|REPLACE_WITH_KV_NAMESPACE_ID|'"${{ secrets.CLOUDFLARE_KV_NAMESPACE_ID }}"'|g' wrangler.toml
