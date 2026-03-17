@@ -1,4 +1,4 @@
-# 推送 main 时自动部署。Secrets：CLOUDFLARE_API_TOKEN、CLOUDFLARE_ACCOUNT_ID、CLOUDFLARE_KV_NAMESPACE_ID（在 Cloudflare 创建 KV 后把 id 填到这里，部署时自动绑定）
+# 推送 main 时自动部署。Secrets：CLOUDFLARE_API_TOKEN、CLOUDFLARE_ACCOUNT_ID、CLOUDFLARE_KV_NAMESPACE_ID
 name: Deploy to Cloudflare Workers
 
 on:
@@ -11,8 +11,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Inject KV namespace id
-        run: sed -i.bak 's/REPLACE_WITH_KV_NAMESPACE_ID/'"${{ secrets.CLOUDFLARE_KV_NAMESPACE_ID }}"'/g' wrangler.toml
+
+      - name: Check required secrets
+        run: |
+          if [ -z "${{ secrets.CLOUDFLARE_API_TOKEN }}" ]; then echo "Missing secret CLOUDFLARE_API_TOKEN"; exit 1; fi
+          if [ -z "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}" ]; then echo "Missing secret CLOUDFLARE_ACCOUNT_ID"; exit 1; fi
+          if [ -z "${{ secrets.CLOUDFLARE_KV_NAMESPACE_ID }}" ]; then echo "Missing secret CLOUDFLARE_KV_NAMESPACE_ID (create KV in Cloudflare, then add its id here)"; exit 1; fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - run: npm install
+
+      - name: Inject secrets into wrangler.toml
+        run: |
+          sed -i.bak 's|REPLACE_WITH_KV_NAMESPACE_ID|'"${{ secrets.CLOUDFLARE_KV_NAMESPACE_ID }}"'|g' wrangler.toml
+
       - name: Deploy with Wrangler
         uses: cloudflare/wrangler-action@v3
         with:
