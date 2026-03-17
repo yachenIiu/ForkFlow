@@ -28,14 +28,16 @@ npm start
 
 > 这些都配置在 **GitHub 仓库** → Settings → Secrets and variables → Actions。
 
-| 名称 | 必填 | 用途 |
-|------|------|------|
-| `CLOUDFLARE_API_TOKEN` | ✅ 必填 | GitHub Actions 调用 Wrangler 部署 Workers |
-| `CLOUDFLARE_ACCOUNT_ID` | ✅ 必填 | 你的 Cloudflare Account ID |
-| `CLOUDFLARE_KV_NAMESPACE_ID` | ✅ 必填 | KV namespace id（在 Cloudflare Workers KV 创建后复制） |
-| `GH_TOKEN` | ⛔ 选填 | GitHub PAT（`repo` + `read:user`）；不想做 OAuth 登录时用，部署时会同步到 Worker 的 `GITHUB_TOKEN` |
-| `GH_OAUTH_CLIENT_ID` | ⛔ 选填 | OAuth 登录：GitHub OAuth App 的 Client ID（见下） |
-| `GH_OAUTH_CLIENT_SECRET` | ⛔ 选填 | OAuth 登录：GitHub OAuth App 的 Client Secret（见下） |
+
+| 名称                           | 必填  | 用途                                                                              |
+| ---------------------------- | --- | ------------------------------------------------------------------------------- |
+| `CLOUDFLARE_API_TOKEN`       | ✅   | GitHub Actions 调用 Wrangler 部署 Workers                                           |
+| `CLOUDFLARE_ACCOUNT_ID`      | ✅   | 你的 Cloudflare Account ID                                                        |
+| `CLOUDFLARE_KV_NAMESPACE_ID` | ✅   | KV namespace id（在 Cloudflare Workers KV 创建后复制）                                  |
+| `GH_TOKEN`                   | ⛔   | GitHub PAT（`repo` + `read:user`）；不想做 OAuth 登录时用，部署时会同步到 Worker 的 `GITHUB_TOKEN` |
+| `GH_OAUTH_CLIENT_ID`         | ⛔   | OAuth 登录：GitHub OAuth App 的 Client ID（见下）                                       |
+| `GH_OAUTH_CLIENT_SECRET`     | ⛔   | OAuth 登录：GitHub OAuth App 的 Client Secret（见下）                                   |
+
 
 **GitHub 鉴权（两种方式二选一，至少选一种）：**
 
@@ -49,7 +51,7 @@ OAuth App 创建入口：[GitHub Developer Settings → OAuth Apps](https://gith
 
 1. Fork 本仓库。
 2. **Cloudflare**：拿 [Account ID](https://dash.cloudflare.com/)；建 [API Token](https://dash.cloudflare.com/profile/api-tokens)（Workers Scripts: Edit、KV: Edit）；在 **Workers KV** 里创建命名空间（或本地 `npx wrangler kv:namespace create REPOS_KV`），复制生成的 **id**。
-3. **GitHub**：Fork 仓库 → Settings → Secrets and variables → Actions，添加必填的 `CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID`、`CLOUDFLARE_KV_NAMESPACE_ID`；再二选一：配 **`GH_TOKEN`**（PAT）或配 **`GH_OAUTH_CLIENT_ID` + `GH_OAUTH_CLIENT_SECRET`**（OAuth 登录，见上表）。
+3. **GitHub**：Fork 仓库 → Settings → Secrets and variables → Actions，添加必填的 `CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID`、`CLOUDFLARE_KV_NAMESPACE_ID`；再二选一：配 `**GH_TOKEN`**（PAT）或配 `**GH_OAUTH_CLIENT_ID` + `GH_OAUTH_CLIENT_SECRET**`（OAuth 登录，见上表）。
 4. 推送到 `main` 即触发部署。
 
 本地部署：先运行 `node build-embed-assets.js` 生成前端内联文件，再在 wrangler.toml 填好 account_id 与 KV id，执行 `npx wrangler deploy`。
@@ -69,18 +71,20 @@ public/                 # 前端（部署时与 Worker 一起发布）
 
 ## API 简表
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/repos` | 仓库列表 |
-| POST | `/api/repos` | 添加仓库（body: `owner?`, `repo`, `branch?`, `label?`） |
-| DELETE/PATCH | `/api/repos/:id` | 删除/更新仓库 |
-| GET | `/api/current-user` | 当前 GitHub 用户 |
-| POST | `/api/sync/:id` | 同步单仓 |
-| POST | `/api/sync-all` | 批量同步 |
-| POST | `/api/import-forks` | 一键导入所有 Fork |
-| POST | `/api/refresh-meta` | 刷新元信息并清理已删除/Fork 取消的仓库 |
-| GET | `/api/auth/login` | 跳转 GitHub OAuth 授权（使用登录方式时） |
-| GET | `/api/auth/callback` | OAuth 回调，重定向回前端并带上 token |
+
+| 方法           | 路径                   | 说明                                                |
+| ------------ | -------------------- | ------------------------------------------------- |
+| GET          | `/api/repos`         | 仓库列表                                              |
+| POST         | `/api/repos`         | 添加仓库（body: `owner?`, `repo`, `branch?`, `label?`） |
+| DELETE/PATCH | `/api/repos/:id`     | 删除/更新仓库                                           |
+| GET          | `/api/current-user`  | 当前 GitHub 用户                                      |
+| POST         | `/api/sync/:id`      | 同步单仓                                              |
+| POST         | `/api/sync-all`      | 批量同步                                              |
+| POST         | `/api/import-forks`  | 一键导入所有 Fork                                       |
+| POST         | `/api/refresh-meta`  | 刷新元信息并清理已删除/Fork 取消的仓库                            |
+| GET          | `/api/auth/login`    | 跳转 GitHub OAuth 授权（使用登录方式时）                       |
+| GET          | `/api/auth/callback` | OAuth 回调，重定向回前端并带上 token                          |
+
 
 ---
 
