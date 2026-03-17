@@ -24,23 +24,26 @@ npm start
 
 部署后**打开 Worker 链接即见前端**，同一域名下 `/api/*` 为接口，无需改代码。
 
-### 配置在哪（务必区分）
+### Secrets/变量（必填 vs 选填）
 
-| 配置项 | 位置 |
-|--------|------|
-| `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_KV_NAMESPACE_ID` | **GitHub 仓库** → Secrets and variables → **Actions**（必填） |
-| `GH_TOKEN` 或 OAuth（见下） | 二选一：变量方式 或 登录方式 |
+> 这些都配置在 **GitHub 仓库** → Settings → Secrets and variables → Actions。
 
-**GitHub 鉴权二选一（可只配一种）：**
+| 名称 | 必填 | 用途 |
+|------|------|------|
+| `CLOUDFLARE_API_TOKEN` | ✅ 必填 | GitHub Actions 调用 Wrangler 部署 Workers |
+| `CLOUDFLARE_ACCOUNT_ID` | ✅ 必填 | 你的 Cloudflare Account ID |
+| `CLOUDFLARE_KV_NAMESPACE_ID` | ✅ 必填 | KV namespace id（在 Cloudflare Workers KV 创建后复制） |
+| `GH_TOKEN` | ⛔ 选填 | GitHub PAT（`repo` + `read:user`）；不想做 OAuth 登录时用，部署时会同步到 Worker 的 `GITHUB_TOKEN` |
+| `GH_OAUTH_CLIENT_ID` | ⛔ 选填 | OAuth 登录：GitHub OAuth App 的 Client ID（见下） |
+| `GH_OAUTH_CLIENT_SECRET` | ⛔ 选填 | OAuth 登录：GitHub OAuth App 的 Client Secret（见下） |
 
-- **方式一：变量 GH_TOKEN**  
-  在仓库 Secrets 添加 `GH_TOKEN`（你的 GitHub PAT，权限 `repo` + `read:user`），每次部署会同步到 Worker。所有人共用该 Token，无需在页面登录。
-- **方式二：GitHub OAuth 登录（推荐，免配 PAT）**  
-  1）在 [GitHub Developer Settings → OAuth Apps](https://github.com/settings/developers) 新建 OAuth App；Homepage URL 填你的 Worker 地址，**Authorization callback URL** 填 `https://你的 Worker 域名/api/auth/callback`。  
-  2）在仓库 Secrets 添加 `GH_OAUTH_CLIENT_ID`、`GH_OAUTH_CLIENT_SECRET`（OAuth App 的 Client ID 与 Client Secret）。  
-  3）部署后，用户打开页面点「使用 GitHub 登录」即可，无需再配置任何 Token。
+**GitHub 鉴权（两种方式二选一，至少选一种）：**
 
-无需改 wrangler.toml；上述 Secret 会在每次部署时自动同步到 Worker。
+- **方式 A：`GH_TOKEN`（最省事）**：所有人共用一套 PAT，无需在页面点登录。
+- **方式 B：OAuth 登录（更安全）**：用户打开页面点「使用 GitHub 登录」，使用自己的账号授权；无需在仓库里保存 PAT。
+
+OAuth App 创建入口：[GitHub Developer Settings → OAuth Apps](https://github.com/settings/developers)  
+回调地址（必须匹配你的 Worker 域名）：`https://你的 Worker 域名/api/auth/callback`
 
 ### Fork 后自动部署
 
