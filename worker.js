@@ -13,6 +13,73 @@ function githubHeaders(token, extra = {}) {
   };
 }
 
+// 轻量重试：用于 GitHub 读取接口，降低偶发网络/限流抖动影响
+// 始终返回 status（最后一次 HTTP 响应码；纯网络异常无响应时为 null）
+async function fetchJsonWithRetry(url, options, retries = 1) {
+  let lastRes = null;
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const res = await fetch(url, options);
+      lastRes = res;
+      const st = res.status;
+      if (res.ok) {
+        const data = await res.json().catch(() => null);
+        return { ok: true, status: st, data };
+      }
+      // 对 5xx / 429 做一次重试，其余直接返回
+      if (!(st >= 500 || st === 429) || i === retries) {
+        let errBody = null;
+        try {
+          errBody = await res.json();
+        } catch {
+          // ignore
+        }
+        return { ok: false, status: st, data: errBody };
+      }
+    } catch (e) {
+      if (i === retries) {
+        return {
+          ok: false,
+          status: null,
+          data: null,
+          fetchError: (e && e.message) || String(e),
+        };
+      }
+    }
+  }
+  return {
+    ok: false,
+    status: lastRes && lastRes.status,
+    data: null,
+  };
+}
+
+// KV 写入失败诊断（用于排查配额/限流等；成功路径不额外写 KV，避免加倍消耗写入次数）
+const KV_WRITE_ERROR_KEY = 'forkflow_kv_write_error';
+
+async function kvPutJson(env, key, value) {
+  const body = JSON.stringify(value);
+  try {
+    await env.REPOS_KV.put(key, body);
+  } catch (e) {
+    const diag = {
+      at: new Date().toISOString(),
+      kvKey: key,
+      message: (e && e.message) || String(e),
+      name: (e && e.name) || 'Error',
+      payloadBytes: body.length,
+      hint:
+        '若出现 quota / limit / 429 等字样，多为 KV 写入配额或限流；本应用每次 updateRepo 会整表重写一次，刷新 N 个仓库约 N 次 put。',
+    };
+    try {
+      await env.REPOS_KV.put(KV_WRITE_ERROR_KEY, JSON.stringify(diag));
+    } catch {
+      // 连诊断 key 都写不进去时只能依赖控制台日志
+    }
+    throw e;
+  }
+}
+
 // ---------- KV 存储封装（替代本地 repos.json） ----------
 // username 不为空时用 repos:${username} 做用户隔离；为空时退回全局 key（env token 场景）
 function reposKvKey(username) {
@@ -34,7 +101,7 @@ async function readRepos(env, username) {
       );
       if (mine.length > 0) {
         // 迁移写入新 key；不删旧全局 key，避免其他用户数据丢失
-        await env.REPOS_KV.put(key, JSON.stringify(mine));
+        await kvPutJson(env, key, mine);
         return mine;
       }
     }
@@ -44,7 +111,7 @@ async function readRepos(env, username) {
 }
 
 async function writeRepos(env, repos, username) {
-  await env.REPOS_KV.put(reposKvKey(username), JSON.stringify(repos));
+  await kvPutJson(env, reposKvKey(username), repos);
 }
 
 function nextId(repos) {
@@ -360,6 +427,28 @@ export default {
           tokenLength: len,
           tokenPrefix: len ? token.slice(0, 7) : '',
           tokenSuffix: len > 11 ? token.slice(-4) : '',
+        });
+      }
+
+      // KV 写入失败诊断（需登录；不增加日常成功路径的 KV 写入）
+      if (request.method === 'GET' && pathname === '/api/debug/kv') {
+        if (!token) {
+          return jsonResponse(
+            { ok: false, message: '请使用 GitHub 登录或配置 GH_TOKEN' },
+            { status: 401 }
+          );
+        }
+        const err = await env.REPOS_KV.get(KV_WRITE_ERROR_KEY, 'json');
+        return jsonResponse({
+          ok: true,
+          data: {
+            lastKvWriteFailure: err && typeof err === 'object' ? err : null,
+            reposKvKey: reposKvKey(username),
+            note:
+              '仅记录最近一次 KV put 抛错（含配额/限流）。成功路径不会额外写 KV。' +
+              '每次 updateRepo 会整表 JSON.stringify 后 put 一次；' +
+              'refresh-meta 每成功刷新 1 个仓库约 1 次 put，全量刷新约「仓库数」次 put。',
+          },
         });
       }
 
@@ -860,6 +949,7 @@ export default {
         const limit = Math.min(50, Math.max(5, Number.isNaN(limitRaw) ? 20 : limitRaw));
         const slice = repos.slice(cursor, cursor + limit);
         const results = [];
+        let kvWritesThisBatch = 0;
 
         for (const r of slice) {
           try {
@@ -913,13 +1003,21 @@ export default {
             // fork 最新 commit（与本地一致：不做回退/兜底）
             let forkLastCommitSha = null;
             let forkLastCommitMessage = null;
+            let metaForkCommitHttpStatus = null;
+            let metaForkCommitError = null;
             try {
-              const cRes = await fetch(
+              const c = await fetchJsonWithRetry(
                 `${GITHUB_API}/repos/${r.owner}/${r.repo}/commits?per_page=1&sha=${forkBranch}`,
-                { headers }
+                { headers },
+                1
               );
-              if (cRes.ok) {
-                const commits = await cRes.json();
+              metaForkCommitHttpStatus =
+                typeof c.status === 'number' ? c.status : null;
+              if (c.fetchError) {
+                metaForkCommitError = String(c.fetchError).slice(0, 240);
+              }
+              if (c.ok) {
+                const commits = c.data;
                 if (Array.isArray(commits) && commits[0]) {
                   forkLastCommitSha = commits[0].sha || null;
                   forkLastCommitMessage =
@@ -938,13 +1036,21 @@ export default {
             // upstream 最新 commit（与本地一致：不做回退/兜底）
             let upstreamLastCommitSha = null;
             let upstreamLastCommitMessage = null;
+            let metaUpstreamCommitHttpStatus = null;
+            let metaUpstreamCommitError = null;
             try {
-              const uRes = await fetch(
+              const u = await fetchJsonWithRetry(
                 `${GITHUB_API}/repos/${info.parent.owner.login}/${info.parent.name}/commits?per_page=1&sha=${upstreamBranch}`,
-                { headers }
+                { headers },
+                1
               );
-              if (uRes.ok) {
-                const uCommits = await uRes.json();
+              metaUpstreamCommitHttpStatus =
+                typeof u.status === 'number' ? u.status : null;
+              if (u.fetchError) {
+                metaUpstreamCommitError = String(u.fetchError).slice(0, 240);
+              }
+              if (u.ok) {
+                const uCommits = u.data;
                 if (Array.isArray(uCommits) && uCommits[0]) {
                   upstreamLastCommitSha = uCommits[0].sha || null;
                   upstreamLastCommitMessage =
@@ -957,12 +1063,15 @@ export default {
 
             // compare 判断是否落后上游（与本地一致：compare 失败默认 false）
             let isBehindUpstream = false;
+            let metaCompareHttpStatus = null;
+            let metaCompareError = null;
             try {
               const [upOwner, upRepo] = upstreamFullName.split('/');
               const cmpRes = await fetch(
                 `${GITHUB_API}/repos/${upOwner}/${upRepo}/compare/${upstreamBranch}...${r.owner}:${forkBranch}`,
                 { headers }
               );
+              metaCompareHttpStatus = cmpRes.status;
               if (cmpRes.ok) {
                 const cmp = await cmpRes.json().catch(() => ({}));
                 const behind = Number(cmp && cmp.behind_by);
@@ -970,20 +1079,38 @@ export default {
                   isBehindUpstream = true;
                 }
               }
-            } catch {
-              // ignore
+            } catch (e) {
+              metaCompareError = ((e && e.message) || String(e)).slice(0, 240);
             }
+
+            const metaRefreshedAt = new Date().toISOString();
 
             await updateRepo(env, r.id, {
               forkPushedAt,
-              forkLastCommitSha,
-              forkLastCommitMessage,
+              // commit 获取失败时保留旧值，避免偶发失败把已有数据清空
+              forkLastCommitSha: forkLastCommitSha || r.forkLastCommitSha || null,
+              forkLastCommitMessage:
+                forkLastCommitMessage || r.forkLastCommitMessage || null,
               upstreamFullName,
               upstreamPushedAt,
-              upstreamLastCommitSha,
-              upstreamLastCommitMessage,
+              upstreamLastCommitSha:
+                upstreamLastCommitSha || r.upstreamLastCommitSha || null,
+              upstreamLastCommitMessage:
+                upstreamLastCommitMessage || r.upstreamLastCommitMessage || null,
               isBehindUpstream,
+              metaRefreshedAt,
+              metaForkCommitHttpStatus,
+              metaUpstreamCommitHttpStatus,
+              metaCompareHttpStatus,
+              ...(metaForkCommitError ? { metaForkCommitError } : {}),
+              ...(metaUpstreamCommitError ? { metaUpstreamCommitError } : {}),
+              ...(metaCompareError ? { metaCompareError } : {}),
             }, username);
+            kvWritesThisBatch += 1;
+
+            const mergedForkSha = forkLastCommitSha || r.forkLastCommitSha || null;
+            const mergedUpSha =
+              upstreamLastCommitSha || r.upstreamLastCommitSha || null;
 
             results.push({
               id: r.id,
@@ -991,11 +1118,18 @@ export default {
               repo: r.repo,
               ok: true,
               forkPushedAt,
-              forkLastCommitSha,
+              forkLastCommitSha: mergedForkSha,
               upstreamFullName,
               upstreamPushedAt,
-              upstreamLastCommitSha,
+              upstreamLastCommitSha: mergedUpSha,
               isBehindUpstream,
+              metaRefreshedAt,
+              metaForkCommitHttpStatus,
+              metaUpstreamCommitHttpStatus,
+              metaCompareHttpStatus,
+              metaForkCommitError: metaForkCommitError || undefined,
+              metaUpstreamCommitError: metaUpstreamCommitError || undefined,
+              metaCompareError: metaCompareError || undefined,
             });
           } catch (err) {
             results.push({
@@ -1017,6 +1151,11 @@ export default {
           processed: slice.length,
           total: repos.length,
           nextCursor: nextCursor >= repos.length ? null : nextCursor,
+          diag: {
+            kvWritesThisBatch,
+            note:
+              '每个成功刷新的仓库会触发 1 次 KV put（整表重写）。全量刷新总 put 次数约等于仓库总数。',
+          },
           data: results,
         });
       }

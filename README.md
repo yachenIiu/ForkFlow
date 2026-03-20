@@ -137,9 +137,17 @@ public/                 # 前端（部署时与 Worker 一起发布）
 | POST         | `/api/sync-all`      | 批量同步                                              |
 | POST         | `/api/import-forks`  | 一键导入所有 Fork                                       |
 | POST         | `/api/refresh-meta`  | 刷新元信息并清理已删除/Fork 取消的仓库                            |
+| GET          | `/api/debug/kv`      | （Worker）查看最近一次 KV `put` 失败记录，排查写入配额/限流（需登录）   |
 | GET          | `/api/auth/login`    | 跳转 GitHub OAuth 授权（使用登录方式时）                       |
 | GET          | `/api/auth/callback` | OAuth 回调，重定向回前端并带上 token                          |
 
+**Worker 元信息诊断字段（`POST /api/refresh-meta` 成功后写入每条 repo）**
+
+- `metaRefreshedAt`：本次刷新时间（ISO）
+- `metaForkCommitHttpStatus` / `metaUpstreamCommitHttpStatus` / `metaCompareHttpStatus`：对应 GitHub API 的 HTTP 状态码（429/403/5xx 等可对照限流或权限）
+- `metaForkCommitError` / `metaUpstreamCommitError` / `metaCompareError`：仅在网络异常等无 HTTP 码时出现，短文本说明
+
+**KV 写入量说明**：当前实现每次更新任意一条仓库都会 **整表 `put` 一次**。全量刷新约「仓库数量」次写入；若 Cloudflare 提示 KV 用量告警，可结合 `GET /api/debug/kv` 中的 `lastKvWriteFailure` 与 `refresh-meta` 返回里的 `diag.kvWritesThisBatch` 排查。
 
 ---
 
