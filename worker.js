@@ -748,7 +748,7 @@ export default {
         return jsonResponse({ ok: result.success, message, data: result.data });
       }
 
-      // 一键批量同步
+      // 一键批量同步（分批：避免单次 invocation 超过 CF subrequest 上限）
       if (request.method === 'POST' && pathname === '/api/sync-all') {
         if (!token) {
           return jsonResponse(
@@ -758,10 +758,32 @@ export default {
         }
         const repos = await listRepos(env, username);
         if (repos.length === 0) {
-          return jsonResponse({ ok: true, data: [], message: '暂无配置的仓库' });
+          return jsonResponse({
+            ok: true,
+            data: [],
+            message: '暂无配置的仓库',
+            cursor: 0,
+            limit: 0,
+            processed: 0,
+            total: 0,
+            nextCursor: null,
+          });
         }
-        const results = await syncAll(repos, token);
-        return jsonResponse({ ok: true, data: results });
+        const cursor = Math.max(0, parseInt(searchParams.get('cursor') || '0', 10) || 0);
+        const limitRaw = parseInt(searchParams.get('limit') || '8', 10);
+        const limit = Math.min(12, Math.max(1, Number.isNaN(limitRaw) ? 8 : limitRaw));
+        const slice = repos.slice(cursor, cursor + limit);
+        const results = await syncAll(slice, token);
+        const nextCursor = cursor + slice.length >= repos.length ? null : cursor + slice.length;
+        return jsonResponse({
+          ok: true,
+          data: results,
+          cursor,
+          limit,
+          processed: slice.length,
+          total: repos.length,
+          nextCursor,
+        });
       }
 
       // 一键导入当前账号下所有 fork 仓库
@@ -819,15 +841,19 @@ export default {
 
         const result = await addMany(env, toAdd, username);
 
-        // 为本次新加入的仓库补充元信息（只查新增的，避免整库刷新）
+        // 为本次新加入的仓库补充元信息（每轮只处理少量，避免与 user/repos 分页叠加后超过 subrequest 上限）
+        const META_ENRICH_PER_IMPORT = 5;
+        let newlyAddedCount = 0;
         if (result.added > 0) {
           const afterRepos = await listRepos(env, username);
           const beforeIds = new Set(beforeRepos.map((r) => r.id));
           const newlyAdded = afterRepos.filter((r) => !beforeIds.has(r.id));
+          newlyAddedCount = newlyAdded.length;
+          const toEnrich = newlyAdded.slice(0, META_ENRICH_PER_IMPORT);
 
           const headers = githubHeaders(token);
 
-          for (const repo of newlyAdded) {
+          for (const repo of toEnrich) {
             try {
               const infoRes = await fetch(
                 `${GITHUB_API}/repos/${repo.owner}/${repo.repo}`,
@@ -920,9 +946,14 @@ export default {
           }
         }
 
+        let message = `检测到 ${forks.length} 个 fork 仓库，本次新增 ${result.added} 个，当前总数 ${result.total}`;
+        if (newlyAddedCount > META_ENRICH_PER_IMPORT) {
+          message += `；已为前 ${META_ENRICH_PER_IMPORT} 个补充元信息，另有 ${newlyAddedCount - META_ENRICH_PER_IMPORT} 个请点击「刷新仓库信息」补全（避免单次请求 GitHub 次数过多）。`;
+        }
+
         return jsonResponse({
           ok: true,
-          message: `检测到 ${forks.length} 个 fork 仓库，本次新增 ${result.added} 个，当前总数 ${result.total}`,
+          message,
           data: result,
         });
       }

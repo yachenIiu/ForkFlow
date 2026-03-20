@@ -457,10 +457,35 @@ app.post('/api/sync-all', async (req, res) => {
   try {
     const repos = store.listRepos();
     if (repos.length === 0) {
-      return res.json({ ok: true, data: [], message: '暂无配置的仓库' });
+      return res.json({
+        ok: true,
+        data: [],
+        message: '暂无配置的仓库',
+        cursor: 0,
+        limit: 0,
+        processed: 0,
+        total: 0,
+        nextCursor: null,
+      });
     }
-    const results = await syncAll(repos, token);
-    res.json({ ok: true, data: results });
+    const cursor = Math.max(0, parseInt(req.query.cursor ?? '0', 10) || 0);
+    const limitParam = req.query.limit;
+    const limit =
+      limitParam === undefined || limitParam === ''
+        ? repos.length
+        : Math.min(100, Math.max(1, parseInt(String(limitParam), 10) || 8));
+    const slice = repos.slice(cursor, cursor + limit);
+    const results = await syncAll(slice, token);
+    const nextCursor = cursor + slice.length >= repos.length ? null : cursor + slice.length;
+    res.json({
+      ok: true,
+      data: results,
+      cursor,
+      limit: slice.length,
+      processed: slice.length,
+      total: repos.length,
+      nextCursor,
+    });
   } catch (e) {
     res.status(500).json({ ok: false, message: e.message });
   }

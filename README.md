@@ -134,8 +134,8 @@ public/                 # 前端（部署时与 Worker 一起发布）
 | DELETE/PATCH | `/api/repos/:id`     | 删除/更新仓库                                           |
 | GET          | `/api/current-user`  | 当前 GitHub 用户                                      |
 | POST         | `/api/sync/:id`      | 同步单仓                                              |
-| POST         | `/api/sync-all`      | 批量同步                                              |
-| POST         | `/api/import-forks`  | 一键导入所有 Fork                                       |
+| POST         | `/api/sync-all`      | 批量同步（Query: `cursor`、`limit`；前端分批，避免 Worker 单次外呼过多） |
+| POST         | `/api/import-forks`  | 一键导入所有 Fork（Worker 每轮仅为前 **5** 个新库补全元信息，其余请「刷新仓库信息」） |
 | POST         | `/api/refresh-meta`  | 刷新元信息并清理已删除/Fork 取消的仓库                            |
 | GET          | `/api/debug/kv`      | （Worker）查看最近一次 KV `put` 失败记录，排查写入配额/限流（需登录）   |
 | GET          | `/api/auth/login`    | 跳转 GitHub OAuth 授权（使用登录方式时）                       |
@@ -149,7 +149,13 @@ public/                 # 前端（部署时与 Worker 一起发布）
 
 **KV 写入量说明**：当前实现每次更新任意一条仓库都会 **整表 `put` 一次**。全量刷新约「仓库数量」次写入；若 Cloudflare 提示 KV 用量告警，可结合 `GET /api/debug/kv` 中的 `lastKvWriteFailure` 与 `refresh-meta` 返回里的 `diag.kvWritesThisBatch` 排查。
 
-**Subrequest 上限（Worker）**：免费档单次 invocation 对外 `fetch` 约 **50 次**。`refresh-meta` 每处理 1 个仓库约 **4～6 次** GitHub 请求，因此单批默认仅 **6** 条（见 `worker.js` / 前端 `limit`）。若出现 `Too many subrequests by single Worker invocation`，请缩小 `limit` 参数，或在付费 Worker 的 `wrangler.toml` 中提高 `[limits] subrequests`（见仓库内 `wrangler.toml` 注释）。
+**Subrequest 上限（Worker）**：免费档单次 invocation 对外 `fetch` 约 **50 次**。
+
+- **`refresh-meta`**：每仓约 **4～6** 次 GitHub 请求，单批默认 **6** 条（见 `worker.js` / 前端 `limit`）。
+- **`sync-all`**：每仓约 **1～3** 次；接口支持 `cursor`/`limit`，前端按 **`limit=8`** 循环直到 `nextCursor` 为空。
+- **`import-forks`**：会先分页拉 `user/repos`（最多 10 页），若再对大量新库逐条补元信息容易顶满上限，因此 Worker **每轮只为前 5 个新库**写完整元信息；若一次新增超过 5 个，完成导入后请点「刷新仓库信息」补全其余条目。
+
+若出现 `Too many subrequests by single Worker invocation`，请缩小上述 `limit` 或降低 enrich 数量，或在付费 Worker 的 `wrangler.toml` 中提高 `[limits] subrequests`（见仓库内注释）。
 
 ---
 

@@ -395,19 +395,6 @@ async function loadRepos() {
   }
 }
 
-// 页面加载时的后台元信息刷新：不打断用户操作，且由后端节流避免频繁访问 GitHub
-async function refreshMetaInBackground() {
-  try {
-    // 由后端根据最近刷新时间决定是否真正访问 GitHub
-    await api('/api/refresh-meta', { method: 'POST' });
-    // 刷新后重新拉取列表，避免“后台已算出需同步，但页面仍显示旧状态”
-    await loadRepos();
-    // 成功或被跳过都不提示，避免打扰用户
-  } catch {
-    // 后台刷新失败静默忽略
-  }
-}
-
 async function syncOne(id) {
   const btn = document.querySelector(`.sync-one[data-id="${id}"]`);
   if (btn) btn.disabled = true;
@@ -485,14 +472,41 @@ async function syncAll() {
   resultEl.className = 'batch-result visible';
   resultEl.innerHTML = '<p>正在批量同步…</p>';
   try {
-    const { data, message } = await api('/api/sync-all', {
-      method: 'POST',
-      signal: controller.signal,
-    });
+    let cursor = 0;
+    const limit = 8;
+    const allData = [];
+    let lastMessage = '';
+
+    // Worker 等有 subrequest 上限：与 refresh-meta 一样分批请求
+    while (true) {
+      const qs = `?cursor=${cursor}&limit=${limit}`;
+      const result = await api('/api/sync-all' + qs, {
+        method: 'POST',
+        signal: controller.signal,
+      });
+      lastMessage = result.message || lastMessage;
+      if (cancelled) return;
+
+      if (Array.isArray(result.data) && result.data.length) {
+        allData.push(...result.data);
+      }
+
+      if (typeof result.total === 'number' && typeof result.processed === 'number') {
+        const done = Math.min(result.total, cursor + result.processed);
+        showLoadingModal(`正在批量同步…（${done}/${result.total}）`);
+      }
+
+      if (result.nextCursor === null || result.nextCursor === undefined) {
+        break;
+      }
+      cursor = Number(result.nextCursor) || 0;
+    }
+
     if (cancelled) return;
+    const data = allData;
     if (!data || data.length === 0) {
-      resultEl.innerHTML = `<p>${message || '暂无仓库或已同步'}</p>`;
-      showToast(message || '完成', 'info');
+      resultEl.innerHTML = `<p>${lastMessage || '暂无仓库或已同步'}</p>`;
+      showToast(lastMessage || '完成', 'info');
       return;
     }
     const ok = data.filter((r) => r.success);
@@ -600,9 +614,8 @@ document.getElementById('filterBehindBtn')?.addEventListener('click', () => {
       if (login && !ownerInput.value) {
         ownerInput.value = login;
       }
-      // 只有在当前有有效 GitHub 凭证时才自动加载列表 & 后台刷新
+      // 有有效凭证时加载列表；元信息请手动点「刷新仓库信息」，避免每次打开页面都打 GitHub
       await loadRepos();
-      refreshMetaInBackground();
     }
   } catch {
     // 获取失败时静默忽略（未登录或 401），保持输入框为空且不加载列表
