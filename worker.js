@@ -943,10 +943,12 @@ export default {
 
         const headers = githubHeaders(token);
 
-        // Worker 有执行时间限制：分批处理，避免一次刷新 100+ 仓库超时导致“只刷新了前几个”
+        // Worker 单次 invocation 有「对外 subrequest」上限（免费档约 50 次）。
+        // 每条仓库：repo 信息 1 + fork commits 至多 2 + upstream commits 至多 2 + compare 1 ≈ 4～6 次。
+        // 批次过大会在中途抛出 “Too many subrequests”，导致 meta*HttpStatus 全为 null。
         const cursor = Math.max(0, parseInt(searchParams.get('cursor') || '0', 10) || 0);
-        const limitRaw = parseInt(searchParams.get('limit') || '20', 10);
-        const limit = Math.min(50, Math.max(5, Number.isNaN(limitRaw) ? 20 : limitRaw));
+        const limitRaw = parseInt(searchParams.get('limit') || '6', 10);
+        const limit = Math.min(8, Math.max(2, Number.isNaN(limitRaw) ? 6 : limitRaw));
         const slice = repos.slice(cursor, cursor + limit);
         const results = [];
         let kvWritesThisBatch = 0;

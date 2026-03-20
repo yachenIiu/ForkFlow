@@ -149,6 +149,8 @@ public/                 # 前端（部署时与 Worker 一起发布）
 
 **KV 写入量说明**：当前实现每次更新任意一条仓库都会 **整表 `put` 一次**。全量刷新约「仓库数量」次写入；若 Cloudflare 提示 KV 用量告警，可结合 `GET /api/debug/kv` 中的 `lastKvWriteFailure` 与 `refresh-meta` 返回里的 `diag.kvWritesThisBatch` 排查。
 
+**Subrequest 上限（Worker）**：免费档单次 invocation 对外 `fetch` 约 **50 次**。`refresh-meta` 每处理 1 个仓库约 **4～6 次** GitHub 请求，因此单批默认仅 **6** 条（见 `worker.js` / 前端 `limit`）。若出现 `Too many subrequests by single Worker invocation`，请缩小 `limit` 参数，或在付费 Worker 的 `wrangler.toml` 中提高 `[limits] subrequests`（见仓库内 `wrangler.toml` 注释）。
+
 ---
 
 ## License

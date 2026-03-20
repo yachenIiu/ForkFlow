@@ -656,7 +656,8 @@ if (refreshMetaBtn) {
 
     try {
       let cursor = 0;
-      const limit = 20;
+      // 与 Worker 默认一致：避免单次请求 GitHub subrequest 超过 CF 免费档上限（约 50）
+      const limit = 6;
       let lastMessage = '';
 
       // Worker 端会分批刷新；这里循环跑完所有批次，避免只刷新前几个仓库

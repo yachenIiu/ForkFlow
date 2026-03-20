@@ -9,3 +9,8 @@ account_id = ""
 [[kv_namespaces]]
 binding = "REPOS_KV"
 id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+# 若 refresh 仍报 “Too many subrequests”，说明单批 GitHub 请求仍偏多，可把下面 limit 再调小，
+# 或在付费 Worker 上提高 subrequests（见 https://developers.cloudflare.com/workers/wrangler/configuration/#limits）
+# [limits]
+# subrequests = 500
